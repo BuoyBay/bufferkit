@@ -1,0 +1,294 @@
+' System C runtime bindings; no third-party native library is required.
+#If TargetWindows Then
+    ' Resolve the actual UCRT exports rather than SDK import-library aliases:
+    ' its _fdopen/_open_osfhandle stubs otherwise select legacy MSVCRT FILE*.
+    Private Optional Declare Function BKRead Lib "ucrtbase" Alias "fread" (buffer As Ptr, size As UInt64, count As UInt64, stream As Ptr) As UInt64
+    Private Optional Declare Function BKWrite Lib "ucrtbase" Alias "fwrite" (buffer As Ptr, size As UInt64, count As UInt64, stream As Ptr) As UInt64
+    Private Optional Declare Function BKFlush Lib "ucrtbase" Alias "fflush" (stream As Ptr) As Int32
+    Private Optional Declare Function BKClose Lib "ucrtbase" Alias "fclose" (stream As Ptr) As Int32
+    Private Optional Declare Function BKAlloc Lib "ucrtbase" Alias "malloc" (count As UInt64) As Ptr
+    Private Optional Declare Sub BKFree Lib "ucrtbase" Alias "free" (buffer As Ptr)
+    Private Optional Declare Function BKSeek Lib "ucrtbase" Alias "_fseeki64" (stream As Ptr, offset As Int64, origin As Int32) As Int32
+#ElseIf TargetMac Then
+    Private Declare Function BKRead Lib "c" Alias "fread" (buffer As Ptr, size As UInt64, count As UInt64, stream As Ptr) As UInt64
+    Private Declare Function BKWrite Lib "c" Alias "fwrite" (buffer As Ptr, size As UInt64, count As UInt64, stream As Ptr) As UInt64
+    Private Declare Function BKFlush Lib "c" Alias "fflush" (stream As Ptr) As Int32
+    Private Declare Function BKClose Lib "c" Alias "fclose" (stream As Ptr) As Int32
+    Private Declare Function BKAlloc Lib "c" Alias "malloc" (count As UInt64) As Ptr
+    Private Declare Sub BKFree Lib "c" Alias "free" (buffer As Ptr)
+    Private Declare Function BKSeek Lib "c" Alias "fseek" (stream As Ptr, offset As Int64, origin As Int32) As Int32
+#ElseIf TargetLinux Then
+    Private Declare Function BKRead Lib "c" Alias "fread" (buffer As Ptr, size As UInt64, count As UInt64, stream As Ptr) As UInt64
+    Private Declare Function BKWrite Lib "c" Alias "fwrite" (buffer As Ptr, size As UInt64, count As UInt64, stream As Ptr) As UInt64
+    Private Declare Function BKFlush Lib "c" Alias "fflush" (stream As Ptr) As Int32
+    Private Declare Function BKClose Lib "c" Alias "fclose" (stream As Ptr) As Int32
+    Private Declare Function BKAlloc Lib "c" Alias "malloc" (count As UInt64) As Ptr
+    Private Declare Sub BKFree Lib "c" Alias "free" (buffer As Ptr)
+    Private Declare Function BKSeek Lib "c" Alias "fseek" (stream As Ptr, offset As Int64, origin As Int32) As Int32
+#End If
+
+''' An owned spool failed, was closed, or its copy destination rejected I/O.
+Public Class BufferSpoolException Inherits Exception
+    Public Sub Constructor(message As String)
+        Super.Constructor(message)
+    End Sub
+End Class
+
+''' Append-only bounded byte storage which spills to a private temporary stream.
+Public Class ByteSpool
+    Private Property mMemory As Bytes
+    Private Property mStream As Ptr = Nil
+    Private Property mCount As Integer = 0
+    Private Property mThreshold As Integer
+    Private Property mLimit As Integer
+    Private Property mReadLimit As Integer
+    Private Property mSpilled As Boolean = False
+    Private Property mClosed As Boolean = False
+    Private Property mFailed As Boolean = False
+
+    Public Sub Constructor(memoryThreshold As Integer = 1048576, maxBytes As Integer = 1073741824, maxReadBytes As Integer = 16777216)
+        If maxBytes < 0 Or maxBytes > 1099511627776 Then Throw New InvalidArgumentException("Spool limit must be in 0..1099511627776")
+        If memoryThreshold < 0 Or memoryThreshold > 67108864 Or memoryThreshold > maxBytes Then Throw New InvalidArgumentException("Memory threshold must be in 0..min(maxBytes,67108864)")
+        If maxReadBytes < 1 Or maxReadBytes > 67108864 Then Throw New InvalidArgumentException("Read limit must be in 1..67108864")
+        mThreshold = memoryThreshold
+        mLimit = maxBytes
+        mReadLimit = maxReadBytes
+        mMemory = New Bytes()
+    End Sub
+
+    Public Property Count As Integer
+        Get
+            Return mCount
+        End Get
+    End Property
+
+    Public Property IsSpilled As Boolean
+        Get
+            Return mSpilled
+        End Get
+    End Property
+
+    Public Property IsClosed As Boolean
+        Get
+            Return mClosed
+        End Get
+    End Property
+
+    Public Property HasFailed As Boolean
+        Get
+            Return mFailed
+        End Get
+    End Property
+
+    Private Sub RequireOpen()
+        If mClosed Then Throw New BufferSpoolException("Spool is closed")
+        If mFailed Then Throw New BufferSpoolException("Spool has failed; close it")
+    End Sub
+
+    Private Sub Fail(message As String)
+        mFailed = True
+        Dim stream As Ptr = mStream
+        mStream = Nil
+        mMemory = Nil
+        If stream <> Nil Then
+            Dim ignored As Int32 = BKClose(stream)
+        End If
+        Throw New BufferSpoolException(message)
+    End Sub
+
+    Private Sub Seek(offset As Integer)
+        If BKSeek(mStream, offset, 0) <> 0 Then Me.Fail("Temporary spool seek failed")
+    End Sub
+
+    Private Sub Spill()
+        mStream = BKTemporary()
+        If mStream = Nil Then Me.Fail("Cannot create private temporary spool")
+        mSpilled = True
+        If mCount > 0 Then
+            If BKWrite(mMemory.DataPtr(), 1, mCount, mStream) <> mCount Then Me.Fail("Temporary spool write failed")
+        End If
+        If BKFlush(mStream) <> 0 Then Me.Fail("Temporary spool flush failed")
+        mMemory = Nil
+    End Sub
+
+    Public Sub Append(data As Bytes)
+        Me.RequireOpen()
+        If data = Nil Then Throw New InvalidArgumentException("Bytes are required")
+        Dim size As Integer = data.Count
+        If size > mLimit - mCount Then Throw New InvalidArgumentException("Spool byte limit exceeded")
+        If size = 0 Then Exit Sub
+        If mStream = Nil And size <= mThreshold - mCount Then
+            mMemory.Append(data)
+        Else
+            If mStream = Nil Then Me.Spill()
+            Me.Seek(mCount)
+            If BKWrite(data.DataPtr(), 1, size, mStream) <> size Then Me.Fail("Temporary spool write failed")
+            If BKFlush(mStream) <> 0 Then Me.Fail("Temporary spool flush failed")
+        End If
+        mCount += size
+    End Sub
+
+    Public Function Read(offset As Integer, count As Integer) As Bytes
+        Me.RequireOpen()
+        If offset < 0 Or count < 0 Or offset > mCount Then Throw New InvalidArgumentException("Invalid spool read range")
+        If count > mCount - offset Or count > mReadLimit Then Throw New InvalidArgumentException("Spool read range exceeds available bytes or read limit")
+        Dim output As New Bytes(count)
+        If count = 0 Then Return output
+        If mStream = Nil Then
+            output.Append(CType(CType(mMemory.DataPtr(), Integer) + offset, Ptr), count)
+            Return output
+        End If
+        Me.Seek(offset)
+        Dim chunkSize As Integer = Math.Min(count, 65536)
+        Dim scratch As Ptr = BKAlloc(chunkSize)
+        If scratch = Nil Then Throw New BufferSpoolException("Spool read allocation failed")
+        Try
+            Dim remaining As Integer = count
+            While remaining > 0
+                Dim amount As Integer = Math.Min(remaining, chunkSize)
+                If BKRead(scratch, 1, amount, mStream) <> amount Then Me.Fail("Temporary spool read failed")
+                output.Append(scratch, amount)
+                remaining -= amount
+            End While
+        Finally
+            BKFree(scratch)
+        End Try
+        Return output
+    End Function
+
+    Public Function ToBytes() As Bytes
+        Return Me.Read(0, mCount)
+    End Function
+
+    Public Sub CopyTo(destination As BinaryStream, chunkBytes As Integer = 65536)
+        Me.RequireOpen()
+        If destination = Nil Then Throw New InvalidArgumentException("A destination stream is required")
+        If chunkBytes < 1 Or chunkBytes > mReadLimit Or chunkBytes > 1048576 Then Throw New InvalidArgumentException("Copy chunk must be in 1..min(readLimit,1048576)")
+        Dim offset As Integer = 0
+        While offset < mCount
+            Dim amount As Integer = Math.Min(chunkBytes, mCount - offset)
+            Dim chunk As Bytes = Me.Read(offset, amount)
+            destination.Write(chunk)
+            If destination.LastError.HasValue Then Throw New BufferSpoolException("Spool copy destination write failed")
+            offset += amount
+        End While
+        destination.Flush()
+        If destination.LastError.HasValue Then Throw New BufferSpoolException("Spool copy destination flush failed")
+    End Sub
+
+    Public Sub Close()
+        If mClosed Then Exit Sub
+        mClosed = True
+        mMemory = Nil
+        Dim stream As Ptr = mStream
+        mStream = Nil
+        If stream <> Nil Then
+            If BKClose(stream) <> 0 Then
+                mFailed = True
+                Throw New BufferSpoolException("Temporary spool close failed")
+            End If
+        End If
+    End Sub
+
+    Public Sub Destructor()
+        Dim stream As Ptr = mStream
+        mStream = Nil
+        If stream <> Nil Then
+            Dim ignored As Int32 = BKClose(stream)
+        End If
+    End Sub
+End Class
+
+#If TargetWindows Then
+    Private Declare Function BKCreateFile Lib "kernel32" Alias "CreateFileW" (filePath As Ptr, access As UInt32, sharing As UInt32, security As Ptr, creation As UInt32, openFlags As UInt32, templateFile As Ptr) As Ptr
+    Private Declare Function BKCloseHandle Lib "kernel32" Alias "CloseHandle" (handle As Ptr) As Int32
+    Private Declare Function BKProcessID Lib "kernel32" Alias "GetCurrentProcessId" () As UInt32
+    Private Declare Function BKLastError Lib "kernel32" Alias "GetLastError" () As UInt32
+    Private Optional Declare Function BKOpenHandle Lib "ucrtbase" Alias "_open_osfhandle" (handle As Integer, openFlags As Int32) As Int32
+    Private Optional Declare Function BKOpenDescriptor Lib "ucrtbase" Alias "_fdopen" (descriptor As Int32, mode As String) As Ptr
+    Private Optional Declare Function BKCloseDescriptor Lib "ucrtbase" Alias "_close" (descriptor As Int32) As Int32
+
+    Private Function BKTemporary() As Ptr
+        Dim folder As FileSystemItem = System.Folders.Temporary()
+        If folder = Nil Then Return Nil
+        For attempt As Integer = 0 To 63
+            Dim name As String = "buoy-spool-" + Str(BKProcessID()) + "-" + Str(System.Microseconds()) + "-" + Str(attempt) + ".tmp"
+            Dim nativePath As String = folder.Child(name).FullPath()
+            If Not BKValidPath(nativePath) Then Return Nil
+            Dim filePath As Bytes = nativePath.AsUTF16LE()
+            filePath.Append(0)
+            filePath.Append(0)
+            ' GENERIC_READ|GENERIC_WRITE; share mode zero; CREATE_NEW;
+            ' FILE_ATTRIBUTE_TEMPORARY|FILE_FLAG_DELETE_ON_CLOSE.
+            Dim handle As Ptr = BKCreateFile(filePath.DataPtr(), 3221225472, 0, Nil, 1, 67109120, Nil)
+            If handle = CType(-1, Ptr) Then
+                Dim code As UInt32 = BKLastError()
+                If code <> 80 And code <> 183 Then Return Nil
+                Continue For
+            End If
+            ' Transfer the already-open handle, never reopen its pathname.
+            Dim descriptor As Int32 = -1
+            Try
+                descriptor = BKOpenHandle(CType(handle, Integer), 32770)
+            Finally
+                If descriptor = -1 Then
+                    Dim ignored As Int32 = BKCloseHandle(handle)
+                End If
+            End Try
+            If descriptor = -1 Then Return Nil
+            Dim stream As Ptr = BKOpenDescriptor(descriptor, "w+b")
+            If stream = Nil Then
+                Dim ignored As Int32 = BKCloseDescriptor(descriptor)
+            End If
+            Return stream
+        Next
+        Return Nil
+    End Function
+#End If
+
+#If TargetWindows Then
+#Else
+    Private Declare Function BKOpen Lib "c" Alias "open" (filePath As String, openFlags As Int32, ...) As Int32
+    Private Declare Function BKUnlink Lib "c" Alias "unlink" (filePath As String) As Int32
+    Private Declare Function BKOpenDescriptor Lib "c" Alias "fdopen" (descriptor As Int32, mode As String) As Ptr
+    Private Declare Function BKCloseDescriptor Lib "c" Alias "close" (descriptor As Int32) As Int32
+    Private Declare Function BKProcessID Lib "c" Alias "getpid" () As Int32
+
+    Private Function BKTemporary() As Ptr
+        Dim folder As FileSystemItem = System.Folders.Temporary()
+        If folder = Nil Then Return Nil
+        For attempt As Integer = 0 To 63
+            Dim name As String = "buoy-spool-" + Str(BKProcessID()) + "-" + Str(System.Microseconds()) + "-" + Str(attempt) + ".tmp"
+            Dim filePath As String = folder.Child(name).FullPath()
+            If Not BKValidPath(filePath) Then Return Nil
+            ' O_RDWR|O_CREAT|O_EXCL|O_CLOEXEC, with owner-only mode 0600.
+            #If TargetMac Then
+                Dim openFlags As Int32 = 16779778
+            #Else
+                Dim openFlags As Int32 = 524482
+            #End If
+            Dim descriptor As Int32 = BKOpen(filePath, openFlags, 384)
+            If descriptor < 0 Then Continue For
+            ' Unlink once, immediately. Never reopen or retry removing a pathname.
+            If BKUnlink(filePath) <> 0 Then
+                Dim ignored As Int32 = BKCloseDescriptor(descriptor)
+                Return Nil
+            End If
+            Dim stream As Ptr = BKOpenDescriptor(descriptor, "w+b")
+            If stream = Nil Then
+                Dim ignored As Int32 = BKCloseDescriptor(descriptor)
+            End If
+            Return stream
+        Next
+        Return Nil
+    End Function
+#End If
+
+Private Function BKValidPath(filePath As String) As Boolean
+    Dim raw As Bytes = Bytes.FromString(filePath, Text.Encodings.UTF8)
+    If raw.Count = 0 Then Return False
+    For index As Integer = 0 To raw.Count - 1
+        If raw.Item(index) = 0 Then Return False
+    Next
+    Return True
+End Function
