@@ -28,9 +28,4 @@ of tmpfile because the installed Buoy SDK stubs omit tmpfile. POSIX fseek's long
 is 64-bit on Buoy's supported LP64 targets; Windows explicitly uses _fseeki64.
 No SDK/runtime/compiler files were changed to add missing stub symbols.
 
-Native Windows validation additionally found SDK import-library aliases that
-selected legacy MSVCRT _fdopen/_open_osfhandle alongside UCRT stdio. Windows UCRT
-bindings now use Optional Declare to resolve all owned stream operations from
-the actual same UCRT module. This independently implemented compatibility fix was
-verified by native compiler builds/executions and PE import inspection; it is not
-derived from the upstream REALbasic implementation.
+Windows UCRT bindings use Optional Declare to resolve all owned stream operations from the same UCRT module. This avoids SDK import aliases that can mix legacy MSVCRT and UCRT FILE pointers. The implementation is independent of the upstream REALbasic code.

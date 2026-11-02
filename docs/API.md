@@ -78,8 +78,6 @@ native compilation/execution and independently checked exclusive mode-0600,
 CLOEXEC temporary-file creation and descriptor cleanup. Intel macOS, Linux arm64
 and Windows ARM64 runtime behavior remains unverified.
 
-Maintainers run the private validation suite before release. See the repository README for public build instructions.
-
 This is a byte storage primitive. It supplies no text editing, encoding inference,
 compression, asynchronous dispatch, persistence or automatic streaming adapter
 for existing whole-buffer HTTP/parser APIs.

@@ -61,10 +61,4 @@ trusted. Destructors provide best-effort cleanup and suppress close errors;
 explicit Close is required to observe those errors. The package changes no
 process-wide settings.
 
-Linux runtime/fault tests and native macOS arm64 and Windows x64 checks, builds and executions
-pass. Windows coverage includes Unicode paths, exclusive sharing, delete-on-close
-and destructor handle cleanup. Six-target checks additionally cover branches
-without establishing other native platform/architecture execution.
-
-
 [Full typed API: properties, parameters, defaults, and returns](typed-api.md)
