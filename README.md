@@ -1,4 +1,4 @@
-# Spool bytes into bounded memory or temporary storage
+# Bounded append-only byte spool, private temp storage
 
 `Import bufferkit` provides `ByteSpool`, bounded append-only binary storage that
 moves from memory to a private temporary stream when its logical byte count
