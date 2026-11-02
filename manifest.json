@@ -1,1 +1,1 @@
-{"schema":1,"name":"bufferkit","version":"0.1.0","description":"Bounded append-only byte spool, private temp storage"}
+{"schema":1,"name":"bufferkit","version":"0.1.0","description":"Bounded byte spool"}
